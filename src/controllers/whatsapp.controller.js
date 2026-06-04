@@ -3,7 +3,7 @@ import twilio from 'twilio';
 /**
  * Shared helper to send a WhatsApp message using Twilio
  */
-const sendWhatsAppHelper = async ({ to, message }) => {
+const sendWhatsAppHelper = async ({ to, message, contentSid, contentVariables }) => {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
   const fromNumber = process.env.TWILIO_WHATSAPP_FROM;
@@ -41,12 +41,26 @@ const sendWhatsAppHelper = async ({ to, message }) => {
   // Initialize Twilio client
   const client = twilio(accountSid, authToken);
 
-  // Send the message
-  return await client.messages.create({
-    body: message,
+  // Prepare payload options
+  const messageOptions = {
     from: formattedFrom,
     to: formattedTo
-  });
+  };
+
+  if (contentSid) {
+    messageOptions.contentSid = contentSid;
+    if (contentVariables) {
+      messageOptions.contentVariables = typeof contentVariables === 'string'
+        ? contentVariables
+        : JSON.stringify(contentVariables);
+    }
+  } else {
+    messageOptions.body = message;
+  }
+
+  // Send the message
+  console.log("Twilio client.messages.create payload:", messageOptions);
+  return await client.messages.create(messageOptions);
 };
 
 /**
@@ -87,6 +101,7 @@ export const sendWhatsAppMessage = async (req, res, next) => {
     });
 
   } catch (error) {
+    console.error("WhatsApp Message Error:", error);
     if (error.statusCode) {
       return res.status(error.statusCode).json({
         success: false,
@@ -141,8 +156,25 @@ export const sendOrderReadyNotification = async (req, res, next) => {
       });
     }
 
-    // Construct the exact approved WhatsApp template body (normalizing \r\n to \n for strict matching)
-    const message = `Hello ${customerName.trim()} 👋,
+    const templateSid = process.env.TWILIO_WHATSAPP_TEMPLATE_SID;
+    let twilioResponse;
+
+    if (templateSid && templateSid !== 'your_approved_template_content_sid_here') {
+      // Send message using approved WhatsApp template to allow sending outside the 24h messaging window
+      const contentVariables = {
+        "1": customerName.trim(),
+        "2": String(boxes).trim(),
+        "3": pendingAmount.trim(),
+        "4": paymentStatus.trim()
+      };
+      twilioResponse = await sendWhatsAppHelper({
+        to,
+        contentSid: templateSid,
+        contentVariables
+      });
+    } else {
+      // Fallback: Construct the exact approved WhatsApp template body (fails outside 24h window)
+      const message = `Hello ${customerName.trim()} 👋,
 
 Greetings from RAJU GHEE SWEETS!
 
@@ -156,7 +188,8 @@ Please be ready to receive the delivery.
 
 Thank you for your business! 😊`.replace(/\r\n/g, '\n');
 
-    const twilioResponse = await sendWhatsAppHelper({ to, message });
+      twilioResponse = await sendWhatsAppHelper({ to, message });
+    }
 
     return res.status(200).json({
       success: true,
@@ -171,6 +204,7 @@ Thank you for your business! 😊`.replace(/\r\n/g, '\n');
     });
 
   } catch (error) {
+    console.error("Order Ready Notification Error:", error);
     if (error.statusCode) {
       return res.status(error.statusCode).json({
         success: false,
