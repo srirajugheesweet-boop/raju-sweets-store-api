@@ -21,3 +21,7 @@ lerna-debug.log*
 .idea/
 .DS_Store
 Thumbs.db
+
+# Firebase Service Account
+serviceAccountKey.json
+
