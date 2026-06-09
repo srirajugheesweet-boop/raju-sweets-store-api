@@ -1,4 +1,11 @@
 import twilio from 'twilio';
+import { generatePdfBuffer } from '../utils/invoicePdf.js';
+import { 
+  uploadPrivatePdf, 
+  getPrivateSignedUrl,
+  uploadPrivateInvoiceImage,
+  getPrivateSignedImageUrl
+} from '../utils/cloudinary.js';
 
 /**
  * Shared helper to send a WhatsApp message using Twilio
@@ -205,6 +212,115 @@ Thank you for your business! 😊`.replace(/\r\n/g, '\n');
 
   } catch (error) {
     console.error("Order Ready Notification Error:", error);
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        message: error.message
+      });
+    }
+    next(error);
+  }
+};
+
+/**
+ * Controller to send the "Order Confirmed" WhatsApp template with private PDF Invoice
+ * POST /api/whatsapp/send-order-confirmation
+ */
+export const sendOrderConfirmationNotification = async (req, res, next) => {
+  try {
+    const { order, invoiceImage } = req.body;
+    if (!order) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order details "order" is required.'
+      });
+    }
+
+    const to = order.customerPhone || '';
+    if (!to || !to.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Customer phone is required on the order.'
+      });
+    }
+
+    let invoiceUrl = '';
+
+    // If base64 invoice image is sent, upload it as private image
+    if (invoiceImage && invoiceImage.trim().startsWith('data:image')) {
+      try {
+        console.log("Uploading base64 invoice image to Cloudinary for order:", order.orderId);
+        const uploadResult = await uploadPrivateInvoiceImage(invoiceImage, order.orderId);
+        console.log("Cloudinary image upload successful:", uploadResult.public_id);
+
+        // Get signed URL for the image
+        invoiceUrl = getPrivateSignedImageUrl(order.orderId);
+        console.log("Generated secure Cloudinary invoice image URL:", invoiceUrl);
+      } catch (imageUploadError) {
+        console.error("Failed to upload invoice image to Cloudinary:", imageUploadError.message);
+      }
+    }
+
+    // Fallback to generating and uploading PDF if image upload failed or was not provided
+    if (!invoiceUrl) {
+      try {
+        // 1. Generate PDF buffer
+        console.log("Generating invoice PDF buffer for order:", order.orderId);
+        const pdfBuffer = await generatePdfBuffer(order);
+
+        // 2. Upload to Cloudinary
+        console.log("Uploading invoice PDF to Cloudinary...");
+        const uploadResult = await uploadPrivatePdf(pdfBuffer, order.orderId);
+        console.log("Cloudinary upload successful:", uploadResult.public_id);
+        
+        // 3. Get signed URL
+        invoiceUrl = getPrivateSignedUrl(order.orderId);
+        console.log("Generated secure Cloudinary invoice URL:", invoiceUrl);
+      } catch (uploadError) {
+        console.error("Failed to generate/upload PDF to Cloudinary:", uploadError.message);
+        // Fallback placeholder URL so Twilio doesn't fail
+        invoiceUrl = `https://raju-sweets-store.vercel.app/orders/${order.orderId}`;
+      }
+    }
+
+    // 4. Send Twilio template message
+    const templateSid = 'HX33743d99c66dcb635a0c596900549cca';
+    
+    const balance = Math.max(0, (order.totalAmount || 0) - (order.receivedAmount || 0));
+    const contentVariables = {
+      "1": order.customerName || 'Customer',
+      "2": "Raju Ghee sweets",
+      "3": order.orderId,
+      "4": String(order.items?.length || 0),
+      "5": `${order.deliveryDate || ''} ${order.deliveryTime || ''}`.trim() || 'N/A',
+      "6": Number(order.totalAmount || 0).toFixed(2),
+      "7": Number(order.receivedAmount || 0).toFixed(2),
+      "8": Number(balance).toFixed(2),
+      "9": invoiceUrl
+    };
+
+    console.log("Sending WhatsApp order confirmation template:", contentVariables);
+    const twilioResponse = await sendWhatsAppHelper({
+      to,
+      contentSid: templateSid,
+      contentVariables
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'WhatsApp order confirmation message sent successfully.',
+      data: {
+        sid: twilioResponse.sid,
+        status: twilioResponse.status,
+        to: twilioResponse.to,
+        from: twilioResponse.from,
+        dateCreated: twilioResponse.dateCreated,
+        invoiceUrl
+      }
+    });
+
+  } catch (error) {
+    console.error("Order Confirmation Notification Error:", error);
     if (error.statusCode) {
       return res.status(error.statusCode).json({
         success: false,
